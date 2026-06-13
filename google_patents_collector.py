@@ -480,17 +480,20 @@ class GooglePatentsDetailEnricher:
                     break
         result["description"] = desc
 
-        # Citation count
+        # Citation count — pattern: "Patent Citations (79)" in text nodes
+        import re as _re
         citation_count = None
-        for th in soup.find_all(["th", "td", "div"]):
-            text = th.get_text(strip=True)
-            if "Patent Citations" in text or "patent citations" in text.lower():
-                parent = th.find_parent(["tr", "div", "li"])
-                if parent:
-                    nums = [s for s in parent.stripped_strings if s.isdigit()]
-                    if nums:
-                        citation_count = int(nums[0])
-                        break
+        for text_node in soup.find_all(string=_re.compile(r'Patent Citations \(\d+')):
+            m = _re.search(r'Patent Citations \((\d+)\)', text_node)
+            if m:
+                citation_count = int(m.group(1))
+                break
+        if citation_count is None:
+            for text_node in soup.find_all(string=_re.compile(r'\bCitations \(\d+')):
+                m = _re.search(r'Citations \((\d+)\)', text_node)
+                if m:
+                    citation_count = int(m.group(1))
+                    break
         result["citation_count"] = citation_count
 
         # Image URLs
