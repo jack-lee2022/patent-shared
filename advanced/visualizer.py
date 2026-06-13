@@ -11,6 +11,9 @@ Generates:
   6. IPC subclass treemap              (squarify; falls back to bar chart)
   7. Citation analysis                 (network graph if edges provided;
                                         top-cited bar chart otherwise)
+  8. Technology Evolution Tree         (directed citation tree if edges provided;
+                                        Gantt timeline fallback)
+  9. Competitor Radar Chart            (each spoke = tech dimension, each polygon = assignee)
 
 Usage:
     python visualizer.py --csv patents.csv --outdir ./output --title "Atomizer"
@@ -402,6 +405,268 @@ def chart_citation_network(
     return out
 
 
+def chart_tech_evolution_tree(
+    df: pd.DataFrame,
+    outdir: Path,
+    citation_edges: list = None,
+    top_n_tech: int = 8,
+) -> Path:
+    """
+    Technology Evolution Tree — shows how technology branches emerged and grew over time.
+
+    Network mode (citation_edges provided + networkx installed):
+        Directed graph laid out chronologically (x = publication year, y = citation depth).
+        Nodes colored by tech category; root nodes (uncited) = founding/ancestor patents.
+
+    Fallback mode (no edges or networkx missing):
+        Gantt-style timeline: each tech category = one row, showing first/peak/last active year.
+        Bubble size at peak year proportional to patent count at that year.
+    """
+    import math
+
+    # ── Network mode ──────────────────────────────────────────────────────────
+    if citation_edges:
+        try:
+            import networkx as nx
+
+            G = nx.DiGraph()
+            G.add_edges_from(citation_edges)
+
+            # Map patent id → year and tech
+            year_map, tech_map = {}, {}
+            if "publication_number" in df.columns:
+                for _, row in df.iterrows():
+                    pid = str(row.get("publication_number", ""))
+                    yr  = pd.to_numeric(row.get("year", None), errors="coerce")
+                    if pid:
+                        if not pd.isna(yr):
+                            year_map[pid] = int(yr)
+                        tech_map[pid] = str(row.get("tech", "其他") or "其他")
+
+            # y-position by topological depth (citation generation)
+            try:
+                gen_map = {}
+                for depth, layer in enumerate(nx.topological_generations(G)):
+                    for node in layer:
+                        gen_map[node] = depth
+            except nx.NetworkXUnfeasible:
+                gen_map = {n: 0 for n in G.nodes()}
+
+            pos = {n: (year_map.get(n, 2010), -gen_map.get(n, 0)) for n in G.nodes()}
+
+            tech_categories = sorted(set(tech_map.get(n, "其他") for n in G.nodes()))
+            palette = sns.color_palette("tab10", max(len(tech_categories), 1))
+            t2c = {t: palette[i % len(palette)] for i, t in enumerate(tech_categories)}
+            node_colors = [t2c.get(tech_map.get(n, "其他"), palette[0]) for n in G.nodes()]
+
+            fig, ax = plt.subplots(figsize=(16, 10))
+            nx.draw_networkx_nodes(G, pos, ax=ax, node_size=80,
+                                   node_color=node_colors, alpha=0.85)
+            nx.draw_networkx_edges(G, pos, ax=ax, edge_color="#CCCCCC",
+                                   arrows=True, arrowsize=8, alpha=0.5,
+                                   connectionstyle="arc3,rad=0.1")
+            legend_patches = [mpatches.Patch(color=t2c[t], label=t) for t in tech_categories]
+            ax.legend(handles=legend_patches, loc="upper left", fontsize=7,
+                      title="技術分類", title_fontsize=8, framealpha=0.8)
+            ax.set_title(
+                "技術演進樹 (Technology Evolution Tree)\n"
+                "箭頭 = 引證方向，X = 申請年份，顏色 = 技術分類",
+                fontsize=12, fontweight="bold"
+            )
+            ax.set_xlabel("申請年份", fontsize=10)
+            ax.tick_params(left=False, labelleft=False)
+            plt.tight_layout()
+            out = outdir / "chart_tech_evolution_tree.png"
+            fig.savefig(out, dpi=150, bbox_inches="tight")
+            plt.close()
+            return out
+
+        except ImportError:
+            print("[VIZ] networkx not installed — using Gantt timeline fallback")
+
+    # ── Fallback: tech activity Gantt timeline ────────────────────────────────
+    if "tech" not in df.columns:
+        print("[VIZ] tech column missing — skipping evolution tree")
+        return None
+
+    df_t = df.dropna(subset=["year"]).copy()
+    df_t["year"] = df_t["year"].astype(int)
+
+    top_techs = [t for t in df_t["tech"].value_counts().head(top_n_tech + 1).index
+                 if t != "其他"][:top_n_tech]
+    df_t = df_t[df_t["tech"].isin(top_techs)]
+    if df_t.empty:
+        return None
+
+    stats = []
+    for tech in top_techs:
+        yr_counts = df_t[df_t["tech"] == tech].groupby("year").size()
+        stats.append({
+            "tech":       tech,
+            "first":      int(yr_counts.index.min()),
+            "last":       int(yr_counts.index.max()),
+            "peak":       int(yr_counts.idxmax()),
+            "peak_count": int(yr_counts.max()),
+            "total":      int(yr_counts.sum()),
+        })
+    stats.sort(key=lambda x: x["first"])
+
+    palette = sns.color_palette("tab10", len(stats))
+    fig, ax = plt.subplots(figsize=(14, max(5, len(stats) * 0.85 + 2)))
+
+    for i, (s, color) in enumerate(zip(stats, palette)):
+        # Active-span bar
+        ax.barh(i, s["last"] - s["first"], left=s["first"],
+                height=0.45, color=color, alpha=0.55, zorder=2)
+        # Peak-year bubble — size proportional to peak count
+        bubble_r = 200 + s["peak_count"] * 70
+        ax.scatter(s["peak"], i, s=bubble_r, color=color, alpha=0.9,
+                   zorder=3, edgecolors="white", linewidths=1.0)
+        ax.text(s["peak"], i, str(s["peak_count"]),
+                va="center", ha="center", fontsize=7, color="white",
+                fontweight="bold", zorder=4)
+        # First-year marker
+        ax.scatter(s["first"], i, s=60, color=color, marker="D",
+                   alpha=0.9, zorder=3, edgecolors="white", linewidths=0.6)
+
+    ax.set_yticks(range(len(stats)))
+    ax.set_yticklabels([f"{s['tech']}  ({s['total']} 件)" for s in stats], fontsize=9)
+    ax.set_xlabel("年份", fontsize=10)
+    ax.set_title(
+        "技術演進時間軸 (Technology Evolution Timeline)\n"
+        "橫條 = 活躍期間，◆ = 首次出現，泡泡 = 峰值年（數字 = 件數）",
+        fontsize=13, fontweight="bold", pad=12
+    )
+    ax.set_xlim(min(s["first"] for s in stats) - 2,
+                max(s["last"] for s in stats) + 2)
+    ax.grid(axis="x", linestyle="--", alpha=0.35, zorder=0)
+    ax.invert_yaxis()
+    plt.tight_layout()
+    out = outdir / "chart_tech_evolution_tree.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close()
+    return out
+
+
+def chart_competitor_radar(
+    df: pd.DataFrame,
+    outdir: Path,
+    top_n: int = 6,
+    min_tech_dims: int = 3,
+) -> Path:
+    """
+    Competitor Technology Radar Chart.
+    Each spoke = one technology dimension; each polygon = one assignee (top N).
+    Reveals which companies are strong/weak in each technology category.
+
+    Dimension selection strategy:
+      1. Try TECH_DIMS (from ipc_classifier) — if fewer than min_tech_dims have any
+         patents among top-N assignees, fall back to IPC subclass mode.
+      2. IPC subclass mode: uses the top-K most common IPC subclasses (4-char prefix)
+         across the entire dataset as radar spokes. Always produces a meaningful chart.
+    """
+    import math
+
+    top_assignees = df["assignee"].value_counts().head(top_n).index.tolist()
+    if not top_assignees:
+        print("[VIZ] No assignees found — skipping radar chart")
+        return None
+
+    # ── Try TECH_DIMS mode ────────────────────────────────────────────────────
+    labels, radar_data = None, None
+    if "tech" in df.columns:
+        try:
+            from advanced.ipc_classifier import TECH_DIMS
+        except ImportError:
+            from ipc_classifier import TECH_DIMS
+
+        candidate_techs = [t for t in TECH_DIMS if t != "其他"]
+        rd = {}
+        for a in top_assignees:
+            counts = df[df["assignee"] == a]["tech"].value_counts()
+            rd[a] = [int(counts.get(t, 0)) for t in candidate_techs]
+
+        nonzero = [any(rd[a][i] > 0 for a in top_assignees)
+                   for i in range(len(candidate_techs))]
+        active_labels = [t for t, keep in zip(candidate_techs, nonzero) if keep]
+
+        if len(active_labels) >= min_tech_dims:
+            labels = active_labels
+            radar_data = {a: [v for v, keep in zip(rd[a], nonzero) if keep]
+                          for a in top_assignees}
+
+    # ── Fallback: IPC subclass mode ───────────────────────────────────────────
+    if labels is None:
+        print("[VIZ] Tech dims insufficient — switching to IPC subclass radar")
+        if "ipc" not in df.columns:
+            print("[VIZ] No IPC column — skipping radar chart")
+            return None
+
+        ipc_series = df["ipc"].dropna().astype(str)
+        ipc_series = ipc_series[ipc_series.str.len() >= 4]
+        top_ipc = ipc_series.str[:4].str.upper().value_counts().head(10).index.tolist()
+        if not top_ipc:
+            print("[VIZ] No IPC data — skipping radar chart")
+            return None
+
+        labels = top_ipc
+        radar_data = {}
+        for a in top_assignees:
+            sub = df[df["assignee"] == a]
+            ipc_s = sub["ipc"].dropna().astype(str)
+            ipc_s = ipc_s[ipc_s.str.len() >= 4].str[:4].str.upper()
+            cnt = ipc_s.value_counts()
+            radar_data[a] = [int(cnt.get(ipc, 0)) for ipc in labels]
+
+    # ── Drop dominant dimensions (>50% of combined portfolios) to reveal secondary tech gaps
+    combined_totals = [sum(radar_data[a][i] for a in top_assignees) for i in range(len(labels))]
+    grand_total = sum(combined_totals) or 1
+    keep_mask = [combined_totals[i] / grand_total <= 0.50 for i in range(len(labels))]
+    if any(keep_mask):
+        labels = [l for l, k in zip(labels, keep_mask) if k]
+        for a in top_assignees:
+            radar_data[a] = [v for v, k in zip(radar_data[a], keep_mask) if k]
+
+    # ── Normalize to portfolio % so each company's shape shows specialization ──
+    norm_data = {}
+    for a in top_assignees:
+        total = sum(radar_data[a]) or 1
+        norm_data[a] = [v / total * 100 for v in radar_data[a]]
+
+    # ── Draw polar chart ──────────────────────────────────────────────────────
+    N      = len(labels)
+    angles = [2 * math.pi * n / N for n in range(N)]
+    angles += angles[:1]
+
+    fig, ax = plt.subplots(figsize=(10, 10), subplot_kw={"polar": True})
+    palette = sns.color_palette("tab10", len(top_assignees))
+
+    for assignee, color in zip(top_assignees, palette):
+        values = norm_data[assignee] + norm_data[assignee][:1]
+        ax.plot(angles, values, linewidth=2, color=color,
+                label=assignee[:30], alpha=0.9)
+        ax.fill(angles, values, alpha=0.12, color=color)
+
+    ax.set_xticks(angles[:-1])
+    ax.set_xticklabels(labels, fontsize=9)
+    ax.tick_params(pad=8)
+    ax.yaxis.set_tick_params(labelsize=7)
+    ax.set_rlabel_position(30)
+    ax.set_title(
+        "競爭者技術佈局雷達圖（各維度 = 佔該申請人組合 %）\n(Competitor Technology Radar — Portfolio %)",
+        fontsize=12, fontweight="bold", pad=25
+    )
+    ax.legend(
+        loc="upper right", bbox_to_anchor=(1.38, 1.12),
+        fontsize=8, title="申請人", title_fontsize=9, framealpha=0.85
+    )
+    plt.tight_layout()
+    out = outdir / "chart_competitor_radar.png"
+    fig.savefig(out, dpi=150, bbox_inches="tight")
+    plt.close()
+    return out
+
+
 # ── Main entry ────────────────────────────────────────────────────────────────
 
 def build_all_charts(
@@ -469,6 +734,12 @@ def build_all_charts(
 
     citation_path = chart_citation_network(df, outdir, citation_edges=citation_edges)
     results["citation"] = str(citation_path) if citation_path else None
+
+    evolution_path = chart_tech_evolution_tree(df, outdir, citation_edges=citation_edges)
+    results["tech_evolution"] = str(evolution_path) if evolution_path else None
+
+    radar_path = chart_competitor_radar(df, outdir)
+    results["competitor_radar"] = str(radar_path) if radar_path else None
 
     # ── Summary ───────────────────────────────────────────────────────────────
     results["total_patents"] = len(df)
