@@ -55,7 +55,7 @@ def _apply_ipc_classification(df: pd.DataFrame) -> pd.DataFrame:
 
     techs, effects = [], []
     for _, row in df.iterrows():
-        ipc     = str(row.get("ipc", "") or "")
+        ipc     = str(row.get("ipc_detail", "") or row.get("ipc", "") or "")
         title   = str(row.get("title", "") or "")
         abstract= str(row.get("abstract", "") or "")
         techs.append(classify_tech(ipc, title, abstract))

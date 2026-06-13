@@ -48,12 +48,13 @@ def enrich_csv(
         return {}
 
     # Add new columns at the end if missing
-    for col in ("abstract", "ipc_detail"):
+    for col in ("abstract", "ipc_detail", "citation_count"):
         if col not in fieldnames:
             fieldnames.append(col)
     for row in rows:
         row.setdefault("abstract", "")
         row.setdefault("ipc_detail", "")
+        row.setdefault("citation_count", "")
 
     # ── Decide which rows need enrichment ────────────────────────────────────
     to_enrich = [
@@ -116,11 +117,18 @@ def enrich_csv(
                 rows[row_idx]["ipc"] = ipc_list[0]  # most specific code first
             ipc_added += 1
 
+        # ── Citation count ────────────────────────────────────────────────────
+        cc = detail.get("citation_count")
+        if cc is not None:
+            rows[row_idx]["citation_count"] = str(cc)
+
         status_parts = []
         if abstract_text:
             status_parts.append(f"abs={len(abstract_text)}ch")
         if ipc_list:
             status_parts.append(f"ipc={len(ipc_list)}")
+        if cc is not None:
+            status_parts.append(f"cit={cc}")
         print(", ".join(status_parts) if status_parts else "no new data")
         enriched += 1
         time.sleep(delay)
